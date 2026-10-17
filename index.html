@@ -1,0 +1,599 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bosque Ciénaga — v1</title>
+<style>
+  :root{
+    --bark:#1a1710;
+    --moss:#4e6b32;
+    --moss-lit:#7ea34a;
+    --rot:#8c3b2a;
+    --bone:#e6dcc3;
+    --ash:#9a927d;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bark);overflow:hidden}
+  body{
+    font-family:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    color:var(--bone);
+    display:flex;align-items:center;justify-content:center;
+  }
+  #wrap{position:relative;width:100%;height:100%}
+  canvas{display:block;width:100%;height:100%;cursor:crosshair}
+
+  #hud{
+    position:absolute;top:0;left:0;right:0;
+    display:flex;gap:28px;align-items:baseline;
+    padding:14px 18px;
+    pointer-events:none;
+    text-shadow:0 2px 6px rgba(0,0,0,.9);
+  }
+  .stat{display:flex;gap:7px;align-items:baseline}
+  .stat b{font-size:23px;font-weight:600;letter-spacing:.01em}
+  .stat span{font-size:13px;color:var(--ash)}
+
+  #bar{
+    position:absolute;left:18px;bottom:18px;
+    display:flex;gap:10px;
+  }
+  .card{
+    width:104px;padding:9px 11px 10px;
+    background:rgba(12,14,9,.86);
+    border:1px solid rgba(126,163,74,.35);
+    border-left:3px solid var(--moss);
+    color:var(--bone);
+    font:inherit;text-align:left;
+    cursor:pointer;
+    transition:background .12s,border-color .12s;
+  }
+  .card:hover:not(:disabled){background:rgba(30,38,20,.95);border-color:var(--moss-lit)}
+  .card:disabled{opacity:.38;cursor:default}
+  .card .n{display:block;font-size:15px;margin-bottom:3px}
+  .card .c{display:block;font-size:12px;color:var(--ash)}
+  .card .q{
+    display:block;height:2px;margin-top:7px;background:rgba(255,255,255,.12);
+  }
+  .card .q i{display:block;height:100%;background:var(--moss-lit);width:0}
+
+  #hint{
+    position:absolute;right:18px;bottom:20px;
+    font-size:12px;color:var(--ash);text-align:right;line-height:1.6;
+    text-shadow:0 2px 6px rgba(0,0,0,.9);
+  }
+  #over{
+    position:absolute;inset:0;display:none;
+    align-items:center;justify-content:center;flex-direction:column;gap:16px;
+    background:rgba(10,12,7,.86);
+  }
+  #over h1{margin:0;font-size:44px;font-weight:500;letter-spacing:.02em}
+  #over button{
+    background:none;border:1px solid var(--moss-lit);color:var(--bone);
+    font:inherit;font-size:15px;padding:9px 22px;cursor:pointer;
+  }
+  #over button:hover{background:rgba(126,163,74,.16)}
+</style>
+
+<div id="wrap">
+  <canvas id="cv"></canvas>
+
+  <div id="hud">
+    <div class="stat"><b id="s-gold">0</b><span>oro</span></div>
+    <div class="stat"><b id="s-pop">0/20</b><span>población</span></div>
+    <div class="stat"><b id="s-inc">+3</b><span>oro por segundo</span></div>
+  </div>
+
+  <div id="bar">
+    <button class="card" id="b-grunt">
+      <span class="n">Bruto</span><span class="c">25 oro · cuerpo a cuerpo</span>
+      <span class="q"><i></i></span>
+    </button>
+    <button class="card" id="b-archer">
+      <span class="n">Arquero</span><span class="c">45 oro · a distancia</span>
+      <span class="q"><i></i></span>
+    </button>
+  </div>
+
+  <div id="hint">
+    flechas o A / D para mover la cámara<br>
+    el oro por muerte sube cerca de la base enemiga
+  </div>
+
+  <div id="over"><h1 id="over-t"></h1><button id="over-b">Otra vez</button></div>
+</div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- constantes
+const MAP_W      = 2400;      // ancho del campo en unidades de mundo
+const GROUND_Y   = 430;       // línea de piso (terreno plano en v1)
+const WORLD_H    = 520;
+const DT         = 1/60;      // paso fijo de simulación
+
+const BASE = {
+  hp: 2000,
+  w: 78, h: 150,
+  cannonRange: 320,
+  cannonDmg: 26,
+  cannonCd: 2.4,
+};
+
+// Ficha de cada unidad. Estos números son de diseño propio: el juego original
+// nunca publicó su tabla de balance.
+const UNITS = {
+  grunt:  { name:"Bruto",   hp:110, dmg:13, atkCd:0.95, range:26,  speed:44, cost:25, pop:1, train:1.2, r:11, ranged:false },
+  archer: { name:"Arquero", hp:62,  dmg:10, atkCd:1.35, range:165, speed:39, cost:45, pop:1, train:2.0, r:9,  ranged:true  },
+};
+
+const POP_CAP    = 20;
+const INCOME     = 3;         // oro pasivo por segundo
+const SPACING    = 20;        // separación mínima en la línea de frente
+
+// Multiplicador de recompensa según la posición del cadáver. Es la mecánica
+// que define al juego: matar lejos de casa paga mucho más.
+const BOUNTY_MIN = 0.5;
+const BOUNTY_MAX = 3.0;
+
+// ---------------------------------------------------------------- estado
+let G;
+
+function reset(){
+  G = {
+    t: 0,
+    gold: 120,
+    pop: 0,
+    over: null,
+    cam: 0,
+    units: [],
+    shots: [],
+    fx: [],
+    queue: { player: null, enemy: null },
+    bases: {
+      player: { x: 130,         hp: BASE.hp, cd: 1.5, team:"player" },
+      enemy:  { x: MAP_W - 130, hp: BASE.hp, cd: 1.5, team:"enemy"  },
+    },
+    aiCd: 4,
+    aiGold: 60,
+  };
+  document.getElementById("over").style.display = "none";
+}
+
+const dirOf = team => team === "player" ? 1 : -1;
+const foeOf = team => team === "player" ? "enemy" : "player";
+
+// Recompensa: 0 en tu base, 1 en la base enemiga.
+function bounty(team, x){
+  const home = G.bases[team].x;
+  const away = G.bases[foeOf(team)].x;
+  const p = Math.min(1, Math.max(0, (x - home) / (away - home)));
+  return BOUNTY_MIN + (BOUNTY_MAX - BOUNTY_MIN) * p;
+}
+
+// ---------------------------------------------------------------- unidades
+function spawn(team, type){
+  const s = UNITS[type];
+  G.units.push({
+    team, type, s,
+    x: G.bases[team].x + dirOf(team) * 46,
+    hp: s.hp, maxHp: s.hp,
+    cd: 0, state: "walk",
+    bob: Math.random() * 6.28,
+    flash: 0,
+  });
+}
+
+function enqueue(team, type){
+  if (G.queue[team]) return false;
+  const s = UNITS[type];
+  const purse = team === "player" ? "gold" : "aiGold";
+  if (G[purse] < s.cost) return false;
+  if (team === "player" && G.pop + s.pop > POP_CAP) return false;
+  G[purse] -= s.cost;
+  G.queue[team] = { type, left: s.train, total: s.train };
+  return true;
+}
+
+// Blanco más cercano hacia adelante, incluida la base rival.
+function findTarget(u){
+  const foe = foeOf(u.team);
+  let best = null, bestD = Infinity;
+  for (const o of G.units){
+    if (o.team === u.team || o.hp <= 0) continue;
+    const d = Math.abs(o.x - u.x);
+    if (d < bestD){ bestD = d; best = o; }
+  }
+  const b = G.bases[foe];
+  const bd = Math.abs(b.x - u.x) - BASE.w / 2;
+  if (bd < bestD){ bestD = bd; best = b; }
+  return { target: best, dist: bestD };
+}
+
+function damage(ent, dmg, killerTeam){
+  ent.hp -= dmg;
+  ent.flash = 0.12;
+  if (ent.hp > 0) return;
+
+  if (ent.s){                                   // murió una unidad
+    // El original paga oro también cuando muere tu propia gente.
+    const mult = bounty(killerTeam, ent.x);
+    const reward = Math.round(ent.s.cost * 0.7 * mult);
+    if (killerTeam === "player") G.gold += reward;
+    else                          G.aiGold += reward;
+
+    // el dueño del cadáver cobra su consuelo, escalado igual por posición
+    const owner = ent.team;
+    const solace = Math.round(ent.s.cost * 0.25 * bounty(owner, ent.x));
+    if (owner === "player") G.gold += solace;
+    else                     G.aiGold += solace;
+
+    if (killerTeam === "player") popup(ent.x, "+" + reward, "#e0c96a");
+    burst(ent.x, GROUND_Y - 8, ent.team);
+  } else {                                      // cayó una base
+    G.over = ent.team === "player" ? "derrota" : "victoria";
+  }
+}
+
+// ---------------------------------------------------------------- simulación
+function step(){
+  G.t += DT;
+  if (G.over) return;
+
+  G.gold   += INCOME * DT;
+  G.aiGold += INCOME * 1.15 * DT;
+
+  // ---- colas de entrenamiento
+  for (const team of ["player","enemy"]){
+    const q = G.queue[team];
+    if (!q) continue;
+    q.left -= DT;
+    if (q.left <= 0){ spawn(team, q.type); G.queue[team] = null; }
+  }
+
+  // ---- IA rival: alterna y presiona más fuerte con el tiempo
+  G.aiCd -= DT;
+  if (G.aiCd <= 0){
+    const wantArcher = G.units.filter(u => u.team === "enemy" && u.type === "archer").length < 3;
+    if (!enqueue("enemy", wantArcher ? "archer" : "grunt")) enqueue("enemy","grunt");
+    G.aiCd = Math.max(1.4, 4.2 - G.t * 0.02);
+  }
+
+  // ---- unidades
+  // El frente se resuelve por equipo: la unidad de adelante manda, las de
+  // atrás guardan distancia. Eso arma la línea sin física real.
+  for (const team of ["player","enemy"]){
+    const dir = dirOf(team);
+    const line = G.units
+      .filter(u => u.team === team && u.hp > 0)
+      .sort((a,b) => (b.x - a.x) * dir);        // el más avanzado primero
+
+    let wallX = null;                            // borde de quien ya se frenó
+
+    for (const u of line){
+      u.cd = Math.max(0, u.cd - DT);
+      u.flash = Math.max(0, u.flash - DT);
+
+      const { target, dist } = findTarget(u);
+      const inRange = target && dist <= u.s.range;
+
+      if (inRange){
+        u.state = "attack";
+        if (u.cd === 0){
+          u.cd = u.s.atkCd;
+          if (u.s.ranged) shoot(u, target);
+          else            damage(target, u.s.dmg, u.team);
+        }
+      } else {
+        u.state = "walk";
+        const next = u.x + dir * u.s.speed * DT;
+        const blocked = wallX !== null && (next - wallX) * dir > -SPACING;
+        if (!blocked) u.x = next;
+      }
+
+      if (u.state === "attack" || (wallX !== null && Math.abs(u.x - wallX) < SPACING + 2)){
+        wallX = u.x;
+      }
+      u.bob += DT * (u.state === "walk" ? 9 : 3);
+    }
+  }
+
+  // ---- cañones de las bases
+  for (const team of ["player","enemy"]){
+    const b = G.bases[team];
+    if (b.hp <= 0) continue;
+    b.cd -= DT;
+    if (b.cd > 0) continue;
+    const foe = foeOf(team);
+    let best = null, bestD = BASE.cannonRange;
+    for (const u of G.units){
+      if (u.team !== foe || u.hp <= 0) continue;
+      const d = Math.abs(u.x - b.x);
+      if (d < bestD){ bestD = d; best = u; }
+    }
+    if (best){
+      b.cd = BASE.cannonCd;
+      G.shots.push({ x:b.x, y:GROUND_Y - 118, tx:best, team, dmg:BASE.cannonDmg, sp:520, heavy:true });
+    }
+  }
+
+  // ---- proyectiles
+  for (const p of G.shots){
+    if (!p.tx || p.tx.hp <= 0){ p.dead = true; continue; }
+    const ty = p.tx.s ? GROUND_Y - 16 : GROUND_Y - 70;
+    const dx = p.tx.x - p.x, dy = ty - p.y;
+    const d = Math.hypot(dx, dy);
+    if (d < 10){ damage(p.tx, p.dmg, p.team); p.dead = true; continue; }
+    p.x += dx / d * p.sp * DT;
+    p.y += dy / d * p.sp * DT;
+  }
+
+  // ---- limpieza
+  G.shots = G.shots.filter(p => !p.dead);
+  G.units = G.units.filter(u => u.hp > 0);
+  G.pop = G.units.filter(u => u.team === "player").length;
+
+  for (const f of G.fx){ f.life -= DT; f.y -= f.vy * DT; f.vy *= 0.97; }
+  G.fx = G.fx.filter(f => f.life > 0);
+}
+
+function shoot(u, target){
+  G.shots.push({
+    x: u.x, y: GROUND_Y - 20, tx: target, team: u.team,
+    dmg: u.s.dmg, sp: 340, heavy: false,
+  });
+}
+
+function popup(x, text, color){
+  G.fx.push({ kind:"text", x, y:GROUND_Y - 40, text, color, life:1.1, vy:26 });
+}
+function burst(x, y, team){
+  for (let i = 0; i < 7; i++){
+    G.fx.push({
+      kind:"bit", x: x + (Math.random()-.5)*14, y,
+      vy: 30 + Math.random()*60, dx:(Math.random()-.5)*40,
+      color: team === "player" ? "#7ea34a" : "#b5643f",
+      life: .45 + Math.random()*.3,
+    });
+  }
+}
+
+// ---------------------------------------------------------------- dibujo
+const cv = document.getElementById("cv");
+const cx = cv.getContext("2d");
+let VW = 0, VH = 0, scale = 1;
+
+function resize(){
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  VW = window.innerWidth; VH = window.innerHeight;
+  cv.width = VW * dpr; cv.height = VH * dpr;
+  cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  scale = Math.max(VH / WORLD_H, 0.55);
+}
+window.addEventListener("resize", resize);
+
+function viewW(){ return VW / scale; }
+function clampCam(){
+  G.cam = Math.max(0, Math.min(MAP_W - viewW(), G.cam));
+}
+
+function draw(){
+  cx.clearRect(0, 0, VW, VH);
+
+  // cielo bajo dosel
+  const sky = cx.createLinearGradient(0, 0, 0, VH);
+  sky.addColorStop(0, "#141a10");
+  sky.addColorStop(.55, "#1e2716");
+  sky.addColorStop(1, "#0e1109");
+  cx.fillStyle = sky;
+  cx.fillRect(0, 0, VW, VH);
+
+  cx.save();
+  cx.scale(scale, scale);
+  cx.translate(-G.cam, (VH / scale - WORLD_H) / 2);
+
+  drawTrees(0.35, "#101508", 210);
+  drawTrees(0.62, "#18200e", 150);
+
+  // suelo
+  cx.fillStyle = "#232a14";
+  cx.fillRect(G.cam - 40, GROUND_Y, viewW() + 80, WORLD_H - GROUND_Y);
+  cx.fillStyle = "#2e3a1a";
+  cx.fillRect(G.cam - 40, GROUND_Y, viewW() + 80, 4);
+
+  drawBase(G.bases.player, "#4e6b32");
+  drawBase(G.bases.enemy,  "#8c3b2a");
+
+  for (const u of G.units) drawUnit(u);
+
+  for (const p of G.shots){
+    cx.fillStyle = p.heavy ? "#d8a13c" : "#cfc39a";
+    const r = p.heavy ? 5 : 2.5;
+    cx.beginPath(); cx.arc(p.x, p.y, r, 0, 6.284); cx.fill();
+  }
+
+  for (const f of G.fx){
+    cx.globalAlpha = Math.min(1, f.life * 2);
+    if (f.kind === "text"){
+      cx.fillStyle = f.color;
+      cx.font = "600 15px Georgia, serif";
+      cx.textAlign = "center";
+      cx.fillText(f.text, f.x, f.y);
+    } else {
+      cx.fillStyle = f.color;
+      cx.fillRect(f.x + f.dx * (0.6 - f.life), f.y, 3, 3);
+    }
+    cx.globalAlpha = 1;
+  }
+
+  cx.restore();
+  drawMinimap();
+}
+
+function drawTrees(par, color, h){
+  const off = G.cam * par;
+  cx.fillStyle = color;
+  const step = 96;
+  const from = Math.floor((G.cam - off) / step) * step;
+  for (let i = -2; i < viewW() / step + 3; i++){
+    const x = from + i * step + off;
+    const sway = Math.sin(x * 0.37) * 18;
+    cx.fillRect(x + sway, GROUND_Y - h, 15, h);
+    cx.beginPath();
+    cx.moveTo(x + sway - 34, GROUND_Y - h + 22);
+    cx.lineTo(x + sway + 7,  GROUND_Y - h - 46);
+    cx.lineTo(x + sway + 48, GROUND_Y - h + 22);
+    cx.closePath(); cx.fill();
+  }
+}
+
+function drawBase(b, color){
+  const x = b.x, top = GROUND_Y - BASE.h;
+  cx.fillStyle = "#191d10";
+  cx.fillRect(x - BASE.w/2 - 5, top + 12, BASE.w + 10, BASE.h - 12);
+  cx.fillStyle = "#2b3319";
+  cx.fillRect(x - BASE.w/2, top, BASE.w, BASE.h);
+  cx.fillStyle = color;
+  cx.beginPath();
+  cx.moveTo(x - BASE.w/2 - 8, top);
+  cx.lineTo(x, top - 34);
+  cx.lineTo(x + BASE.w/2 + 8, top);
+  cx.closePath(); cx.fill();
+
+  // troneras
+  cx.fillStyle = "#0d1007";
+  for (let i = 0; i < 3; i++) cx.fillRect(x - 22, top + 34 + i * 32, 44, 13);
+
+  // vida
+  const w = BASE.w + 16, p = Math.max(0, b.hp / BASE.hp);
+  cx.fillStyle = "rgba(0,0,0,.6)";
+  cx.fillRect(x - w/2, top - 52, w, 7);
+  cx.fillStyle = p > .3 ? "#7ea34a" : "#b5432f";
+  cx.fillRect(x - w/2, top - 52, w * p, 7);
+}
+
+function drawUnit(u){
+  const s = u.s;
+  const lift = u.state === "walk" ? Math.abs(Math.sin(u.bob)) * 3 : 0;
+  const y = GROUND_Y - lift;
+  const face = dirOf(u.team);
+
+  cx.fillStyle = "rgba(0,0,0,.35)";
+  cx.beginPath(); cx.ellipse(u.x, GROUND_Y + 2, s.r + 2, 3.5, 0, 0, 6.284); cx.fill();
+
+  const body = u.flash > 0 ? "#f2e6c4"
+             : u.team === "player" ? (s.ranged ? "#9ab861" : "#5e7f37")
+                                   : (s.ranged ? "#c07a52" : "#9c452f");
+  // cuerpo
+  cx.fillStyle = body;
+  cx.fillRect(u.x - s.r/2, y - s.r * 2.1, s.r, s.r * 2.1);
+  // cabeza
+  cx.beginPath(); cx.arc(u.x, y - s.r * 2.5, s.r * 0.62, 0, 6.284); cx.fill();
+  // arma
+  cx.strokeStyle = "#cbbf98"; cx.lineWidth = 2;
+  cx.beginPath();
+  if (s.ranged){
+    cx.moveTo(u.x + face * s.r * 0.7, y - s.r * 2.4);
+    cx.lineTo(u.x + face * s.r * 0.7, y - s.r * 1.1);
+  } else {
+    cx.moveTo(u.x + face * s.r * 0.5, y - s.r * 1.9);
+    cx.lineTo(u.x + face * s.r * 1.5, y - s.r * 2.6);
+  }
+  cx.stroke();
+
+  if (u.hp < u.maxHp){
+    const w = 22, p = u.hp / u.maxHp;
+    cx.fillStyle = "rgba(0,0,0,.55)"; cx.fillRect(u.x - w/2, y - s.r*3.4, w, 3);
+    cx.fillStyle = p > .35 ? "#a8c96b" : "#c9503a";
+    cx.fillRect(u.x - w/2, y - s.r*3.4, w * p, 3);
+  }
+}
+
+function drawMinimap(){
+  const w = 240, h = 6, x = (VW - w) / 2, y = 22;
+  cx.fillStyle = "rgba(0,0,0,.5)"; cx.fillRect(x, y, w, h);
+  for (const u of G.units){
+    cx.fillStyle = u.team === "player" ? "#7ea34a" : "#b5643f";
+    cx.fillRect(x + (u.x / MAP_W) * w, y, 2, h);
+  }
+  // ventana visible
+  cx.strokeStyle = "rgba(230,220,195,.55)"; cx.lineWidth = 1;
+  cx.strokeRect(x + (G.cam / MAP_W) * w, y - 2, (viewW() / MAP_W) * w, h + 4);
+}
+
+// ---------------------------------------------------------------- entrada
+const keys = new Set();
+addEventListener("keydown", e => {
+  keys.add(e.key.toLowerCase());
+  if (["arrowleft","arrowright"," "].includes(e.key.toLowerCase())) e.preventDefault();
+  if (e.key === "1") enqueue("player","grunt");
+  if (e.key === "2") enqueue("player","archer");
+});
+addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
+
+document.getElementById("b-grunt").onclick  = () => enqueue("player","grunt");
+document.getElementById("b-archer").onclick = () => enqueue("player","archer");
+document.getElementById("over-b").onclick   = () => reset();
+
+let mouseX = null;
+cv.addEventListener("mousemove", e => mouseX = e.clientX);
+cv.addEventListener("mouseleave", () => mouseX = null);
+
+function camera(dt){
+  const sp = 520 * dt;
+  if (keys.has("arrowleft")  || keys.has("a")) G.cam -= sp;
+  if (keys.has("arrowright") || keys.has("d")) G.cam += sp;
+  if (mouseX !== null){                       // empuje en los bordes
+    if (mouseX < 55)        G.cam -= sp * 0.8;
+    if (mouseX > VW - 55)   G.cam += sp * 0.8;
+  }
+  clampCam();
+}
+
+// ---------------------------------------------------------------- HUD
+const el = {
+  gold: document.getElementById("s-gold"),
+  pop:  document.getElementById("s-pop"),
+  inc:  document.getElementById("s-inc"),
+  grunt: document.getElementById("b-grunt"),
+  archer: document.getElementById("b-archer"),
+};
+
+function syncHud(){
+  el.gold.textContent = Math.floor(G.gold);
+  el.pop.textContent  = G.pop + "/" + POP_CAP;
+  el.inc.textContent  = "+" + INCOME;
+
+  for (const [type, btn] of [["grunt", el.grunt], ["archer", el.archer]]){
+    const s = UNITS[type];
+    btn.disabled = !!G.queue.player || G.gold < s.cost || G.pop >= POP_CAP;
+    const q = G.queue.player;
+    const fill = btn.querySelector(".q i");
+    fill.style.width = (q && q.type === type)
+      ? ((1 - q.left / q.total) * 100).toFixed(0) + "%"
+      : "0%";
+  }
+
+  if (G.over){
+    const o = document.getElementById("over");
+    document.getElementById("over-t").textContent =
+      G.over === "victoria" ? "El bosque es tuyo" : "Cayó tu bastión";
+    o.style.display = "flex";
+  }
+}
+
+// ---------------------------------------------------------------- bucle
+let last = performance.now(), acc = 0;
+function frame(now){
+  const dt = Math.min(0.25, (now - last) / 1000);
+  last = now;
+  acc += dt;
+  camera(dt);
+  while (acc >= DT){ step(); acc -= DT; }
+  draw();
+  syncHud();
+  requestAnimationFrame(frame);
+}
+
+resize();
+reset();
+G.cam = 0;
+requestAnimationFrame(frame);
+</script>
