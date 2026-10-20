@@ -18,6 +18,16 @@ Abrí `index.html` en el navegador. No hay build ni servidor.
 | Entrenar Bruto | `1` o el botón |
 | Entrenar Arquero | `2` o el botón |
 | Mover cámara | `←` `→` o `A` / `D`, o el mouse en los bordes |
+| Silenciar | `M` |
+
+## Sonido
+
+El juego busca cada efecto en `sounds/<nombre>.ogg|mp3|wav` (la lista está en
+[`sounds/LEEME.md`](sounds/LEEME.md)). Para que suene exactamente como el original,
+extraé los audios de tu copia del SWF con [JPEXS FFDec](https://github.com/jindrapetrik/jpexs-decompiler)
+(abrís el `.swf` → carpeta *sounds* → seleccionás todo → *Export*), escuchalos y
+renombrá cada uno según el evento. Esos archivos no se commitean. Los que falten
+suenan con un reemplazo sintetizado.
 
 ## Mecánicas de la v1
 

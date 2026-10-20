@@ -4,3 +4,7 @@ dist/
 *.log
 .vscode/
 .idea/
+
+# sonidos originales extraídos del SWF: material con copyright, no se commitean
+sounds/*
+!sounds/LEEME.md

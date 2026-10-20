@@ -93,7 +93,7 @@
   </div>
 
   <div id="hint">
-    flechas o A / D para mover la cámara<br>
+    flechas o A / D para mover la cámara · M silencia<br>
     el oro por muerte sube cerca de la base enemiga
   </div>
 
@@ -132,6 +132,126 @@ const SPACING    = 20;        // separación mínima en la línea de frente
 // que define al juego: matar lejos de casa paga mucho más.
 const BOUNTY_MIN = 0.5;
 const BOUNTY_MAX = 3.0;
+
+// ---------------------------------------------------------------- sonido
+// Cada evento busca su archivo en sounds/<nombre>.(ogg|mp3|wav). Ahí van los
+// sonidos originales extraídos del SWF (ver README); no se commitean. Si un
+// archivo falta, suena un reemplazo sintetizado.
+const SFX_NAMES = [
+  "train", "deny",
+  "spawn_grunt", "spawn_archer",
+  "hit_melee", "bow", "arrow_hit",
+  "cannon", "cannon_hit", "base_hit",
+  "death_player", "death_enemy",
+  "victory", "defeat",
+];
+const SFX_EXT = ["ogg", "mp3", "wav"];
+const SFX_GAP = 0.045;        // separación mínima entre dos disparos del mismo sonido
+const SFX_HEAR = 900;         // distancia a la cámara donde un sonido deja de oírse
+
+const Sfx = {
+  ctx: null,
+  files: {},                  // nombre -> <audio> cargado
+  lastAt: {},
+  muted: false,
+  vol: 0.7,
+
+  init(){
+    for (const name of SFX_NAMES) this.load(name, 0);
+    const unlock = () => {
+      if (!this.ctx){
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) this.ctx = new AC();
+      }
+      if (this.ctx && this.ctx.state === "suspended") this.ctx.resume();
+    };
+    addEventListener("pointerdown", unlock);
+    addEventListener("keydown", unlock);
+  },
+
+  // <audio> en vez de fetch para que funcione abriendo index.html desde file://
+  load(name, i){
+    if (i >= SFX_EXT.length) return;
+    const a = new Audio();
+    a.preload = "auto";
+    a.addEventListener("canplaythrough", () => { this.files[name] = a; }, { once:true });
+    a.addEventListener("error", () => this.load(name, i + 1), { once:true });
+    a.src = "sounds/" + name + "." + SFX_EXT[i];
+  },
+
+  // x en coordenadas de mundo: atenúa lo que pasa fuera de cámara
+  play(name, x){
+    if (this.muted) return;
+    const now = performance.now() / 1000;
+    if (now - (this.lastAt[name] || 0) < SFX_GAP) return;
+    this.lastAt[name] = now;
+
+    let gain = this.vol;
+    if (x !== undefined && G){
+      const mid = G.cam + viewW() / 2;
+      const off = Math.max(0, Math.abs(x - mid) - viewW() / 2);
+      gain *= Math.max(0, 1 - off / SFX_HEAR);
+      if (gain <= 0.01) return;
+    }
+
+    const file = this.files[name];
+    if (file){
+      const a = file.cloneNode();
+      a.volume = Math.min(1, gain);
+      a.play().catch(() => {});
+      return;
+    }
+    if (this.ctx && this.ctx.state === "running") synth(this.ctx, name, gain);
+  },
+};
+
+// Reemplazos mientras no estén los archivos originales.
+function synth(ac, name, gain){
+  const t = ac.currentTime;
+  const out = ac.createGain();
+  out.gain.value = gain * 0.5;
+  out.connect(ac.destination);
+
+  const tone = (type, f0, f1, dur, vol = 1, at = 0) => {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t + at);
+    o.frequency.exponentialRampToValueAtTime(f1, t + at + dur);
+    g.gain.setValueAtTime(vol, t + at);
+    g.gain.exponentialRampToValueAtTime(0.001, t + at + dur);
+    o.connect(g); g.connect(out);
+    o.start(t + at); o.stop(t + at + dur + 0.02);
+  };
+  const noise = (dur, freq, vol = 1, at = 0) => {
+    const len = Math.ceil(ac.sampleRate * dur);
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const src = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+    src.buffer = buf;
+    f.type = "lowpass"; f.frequency.value = freq;
+    g.gain.value = vol;
+    src.connect(f); f.connect(g); g.connect(out);
+    src.start(t + at);
+  };
+
+  switch (name){
+    case "train":        tone("square", 520, 780, 0.08, 0.35); break;
+    case "deny":         tone("square", 180, 140, 0.14, 0.35); break;
+    case "spawn_grunt":  tone("sawtooth", 140, 90, 0.22, 0.5); noise(0.12, 900, 0.4); break;
+    case "spawn_archer": tone("triangle", 330, 440, 0.12, 0.5); tone("triangle", 440, 560, 0.1, 0.4, 0.08); break;
+    case "hit_melee":    noise(0.09, 1800, 0.9); tone("square", 220, 110, 0.06, 0.3); break;
+    case "bow":          tone("triangle", 900, 300, 0.09, 0.4); noise(0.06, 4000, 0.25); break;
+    case "arrow_hit":    noise(0.05, 2600, 0.6); break;
+    case "cannon":       noise(0.4, 500, 1); tone("sine", 90, 40, 0.35, 0.9); break;
+    case "cannon_hit":   noise(0.3, 700, 0.9); tone("sine", 70, 35, 0.25, 0.7); break;
+    case "base_hit":     tone("square", 120, 80, 0.1, 0.4); noise(0.1, 1200, 0.5); break;
+    case "death_player":
+    case "death_enemy":  tone("sawtooth", name === "death_player" ? 300 : 240, 70, 0.3, 0.45); break;
+    case "victory":      [523, 659, 784, 1046].forEach((f, i) => tone("square", f, f, 0.22, 0.35, i * 0.14)); break;
+    case "defeat":       [392, 330, 262, 196].forEach((f, i) => tone("square", f, f * 0.98, 0.28, 0.35, i * 0.18)); break;
+  }
+}
 
 // ---------------------------------------------------------------- estado
 let G;
@@ -179,16 +299,24 @@ function spawn(team, type){
     bob: Math.random() * 6.28,
     flash: 0,
   });
+  Sfx.play("spawn_" + type, G.bases[team].x);
 }
 
 function enqueue(team, type){
-  if (G.queue[team]) return false;
+  if (G.queue[team]){
+    if (team === "player") Sfx.play("deny");
+    return false;
+  }
   const s = UNITS[type];
   const purse = team === "player" ? "gold" : "aiGold";
-  if (G[purse] < s.cost) return false;
-  if (team === "player" && G.pop + s.pop > POP_CAP) return false;
+  const mine = team === "player";
+  if (G[purse] < s.cost || (mine && G.pop + s.pop > POP_CAP)){
+    if (mine) Sfx.play("deny");
+    return false;
+  }
   G[purse] -= s.cost;
   G.queue[team] = { type, left: s.train, total: s.train };
+  if (mine) Sfx.play("train");
   return true;
 }
 
@@ -207,8 +335,10 @@ function findTarget(u){
   return { target: best, dist: bestD };
 }
 
-function damage(ent, dmg, killerTeam){
+function damage(ent, dmg, killerTeam, kind){
+  if (G.over) return;
   ent.hp -= dmg;
+  Sfx.play(ent.s ? kind : "base_hit", ent.x);
   ent.flash = 0.12;
   if (ent.hp > 0) return;
 
@@ -227,8 +357,10 @@ function damage(ent, dmg, killerTeam){
 
     if (killerTeam === "player") popup(ent.x, "+" + reward, "#e0c96a");
     burst(ent.x, GROUND_Y - 8, ent.team);
+    Sfx.play("death_" + ent.team, ent.x);
   } else {                                      // cayó una base
     G.over = ent.team === "player" ? "derrota" : "victoria";
+    Sfx.play(G.over === "victoria" ? "victory" : "defeat");
   }
 }
 
@@ -279,7 +411,7 @@ function step(){
         if (u.cd === 0){
           u.cd = u.s.atkCd;
           if (u.s.ranged) shoot(u, target);
-          else            damage(target, u.s.dmg, u.team);
+          else            damage(target, u.s.dmg, u.team, "hit_melee");
         }
       } else {
         u.state = "walk";
@@ -311,6 +443,7 @@ function step(){
     if (best){
       b.cd = BASE.cannonCd;
       G.shots.push({ x:b.x, y:GROUND_Y - 118, tx:best, team, dmg:BASE.cannonDmg, sp:520, heavy:true });
+      Sfx.play("cannon", b.x);
     }
   }
 
@@ -320,7 +453,10 @@ function step(){
     const ty = p.tx.s ? GROUND_Y - 16 : GROUND_Y - 70;
     const dx = p.tx.x - p.x, dy = ty - p.y;
     const d = Math.hypot(dx, dy);
-    if (d < 10){ damage(p.tx, p.dmg, p.team); p.dead = true; continue; }
+    if (d < 10){
+      damage(p.tx, p.dmg, p.team, p.heavy ? "cannon_hit" : "arrow_hit");
+      p.dead = true; continue;
+    }
     p.x += dx / d * p.sp * DT;
     p.y += dy / d * p.sp * DT;
   }
@@ -339,6 +475,7 @@ function shoot(u, target){
     x: u.x, y: GROUND_Y - 20, tx: target, team: u.team,
     dmg: u.s.dmg, sp: 340, heavy: false,
   });
+  Sfx.play("bow", u.x);
 }
 
 function popup(x, text, color){
@@ -525,6 +662,7 @@ addEventListener("keydown", e => {
   if (["arrowleft","arrowright"," "].includes(e.key.toLowerCase())) e.preventDefault();
   if (e.key === "1") enqueue("player","grunt");
   if (e.key === "2") enqueue("player","archer");
+  if (e.key.toLowerCase() === "m") Sfx.muted = !Sfx.muted;
 });
 addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
 
@@ -593,6 +731,7 @@ function frame(now){
 }
 
 resize();
+Sfx.init();
 reset();
 G.cam = 0;
 requestAnimationFrame(frame);
