@@ -446,19 +446,31 @@ function clampCam(){
 }
 
 // Capas de fondo con el parallax medido en las capturas: el sol queda fijo,
-// las montañas corren a 0.2 y las colinas verdes a 0.52 de la cámara.
-const MOUNTAINS = [            // [x en la capa, y del pico, media base]
-  [255,145,150],[734,178,140],[925,55,260],[1290,95,220],
+// cerros lejanos, lago y montañas corren a 0.24 de la cámara y las colinas
+// verdes a 0.52. Cada capa se reconstruyó uniendo las seis capturas.
+const MTN_PAR  = 0.24;
+const HILL_PAR = 0.52;
+const MTN_FOOT = 420;
+const MOUNTAINS = [            // [x del pico en la capa, y del pico, base izq., base der.]
+  [278,148,209,209],[790,176,197,197],[1020,60,255,277],[1410,99,292,284],
 ];
-const FAR_HILLS = [[120,330,260],[520,300,200],[860,320,240],[1180,290,220],[1450,325,200]];
+const PALE_PEAKS = [           // cerros celestes detrás del lago, en punta
+  [597,217,120,120],[1230,144,180,200],
+];
+const PALE_DOMES = [           // y lomas celestes redondeadas [x, y del lomo, media base]
+  [450,232,140],[840,190,170],[1235,193,95],
+];
+const LAKE_Y = 318;
 const GREEN_HILLS = [          // cresta de la capa 0.52
-  [0,150],[160,160],[240,164],[300,173],[350,184],[384,195],[430,210],
-  [470,228],[500,243],[550,270],[600,294],[640,311],[700,335],[760,353],
-  [820,369],[900,385],[1000,392],[1150,390],[1230,380],[1270,369],
-  [1310,359],[1340,350],[1390,329],[1430,314],[1490,292],[1540,272],
-  [1590,255],[1640,238],[1690,222],[1740,208],[1800,200],[1960,200],
-  [2010,209],[2080,225],[2140,244],[2190,264],[2250,295],[2300,317],
-  [2350,337],[2400,356],[2514,395],
+  [0,160],[180,164],[240,164],[270,169],[300,173],[330,179],[360,186],
+  [450,218],[480,233],[510,249],[600,295],[630,307],[720,341],[750,350],
+  [780,358],[810,366],[840,373],[930,388],[1020,396],[1080,396],[1110,395],
+  [1140,393],[1170,389],[1230,379],[1260,373],[1290,365],[1320,356],
+  [1380,333],[1410,322],[1530,275],[1560,265],[1590,255],[1620,244],
+  [1650,234],[1680,225],[1710,218],[1800,202],[1830,198],[1860,197],
+  [1920,199],[1950,201],[1980,204],[2010,209],[2070,222],[2100,230],
+  [2130,239],[2190,264],[2220,279],[2250,294],[2280,308],[2310,321],
+  [2340,334],[2370,345],[2514,395],
 ];
 const greenRidge = monotone(GREEN_HILLS);
 
@@ -482,9 +494,10 @@ function draw(){
   cx.translate(0, top);
 
   // cielo
-  const sky = cx.createLinearGradient(0, 0, 0, 360);
+  const sky = cx.createLinearGradient(0, 0, 0, 330);
   sky.addColorStop(0, "#5197fe");
-  sky.addColorStop(1, "#c4e4f3");
+  sky.addColorStop(.75, "#b2d1fe");
+  sky.addColorStop(1, "#b8def0");
   cx.fillStyle = sky;
   cx.fillRect(0, -top, viewW(), VH / scale);
 
@@ -494,9 +507,9 @@ function draw(){
   cx.fillStyle = "#ffff33";
   cx.beginPath(); cx.arc(585, 122, 60, 0, 6.284); cx.fill();
 
-  drawMountains(G.cam * 0.2);
-  drawFarHills(G.cam * 0.2);
-  drawGreenHills(G.cam * 0.52);
+  drawFarHills(G.cam * MTN_PAR);
+  drawMountains(G.cam * MTN_PAR);
+  drawGreenHills(G.cam * HILL_PAR);
 
   cx.translate(-G.cam, 0);
   drawGround();
@@ -533,52 +546,74 @@ function draw(){
 }
 
 // ---- capas de fondo (x en coordenadas de pantalla, off = corrimiento de la capa)
-function drawMountains(off){
-  for (const [mx, py, hw] of MOUNTAINS){
-    const sx = mx - off;
-    if (sx + hw < 0 || sx - hw > viewW()) continue;
-    const foot = 390;
-    const g = cx.createLinearGradient(0, py, 0, foot);
-    g.addColorStop(0, "#5f8fb8"); g.addColorStop(1, "#9dc3dc");
-    cx.fillStyle = g;
-    cx.beginPath();
-    cx.moveTo(sx - hw, foot);
-    cx.lineTo(sx - 16, py + 12);
-    cx.quadraticCurveTo(sx, py - 6, sx + 16, py + 12);
-    cx.lineTo(sx + hw, foot);
-    cx.closePath(); cx.fill();
+function peakPath(sx, py, lw, rw, foot){
+  cx.beginPath();
+  cx.moveTo(sx - lw, foot);
+  cx.lineTo(sx - 14, py + 14 * (foot - py) / lw);
+  cx.quadraticCurveTo(sx, py - 4, sx + 14, py + 14 * (foot - py) / rw);
+  cx.lineTo(sx + rw, foot);
+  cx.closePath();
+}
 
-    // nieve con borde festoneado
-    const sy = py + (foot - py) * 0.36;
-    const k = (sy - py - 12) / (foot - py - 12);
-    const lx = sx - 16 - (hw - 16) * k, rx = sx + 16 + (hw - 16) * k;
-    cx.fillStyle = "#f3f6f8";
+function drawMountains(off){
+  for (const [mx, py, lw, rw] of MOUNTAINS){
+    const sx = mx - off;
+    if (sx + rw < 0 || sx - lw > viewW()) continue;
+    const g = cx.createLinearGradient(0, py, 0, MTN_FOOT - 60);
+    g.addColorStop(0, "#7cb4d8"); g.addColorStop(1, "#5c9cba");
+    cx.fillStyle = g;
+    peakPath(sx, py, lw, rw, MTN_FOOT);
+    cx.fill();
+
+    // nieve: baja ~40 % de la altura, con borde festoneado
+    const sy = py + (MTN_FOOT - py) * 0.4;
+    const k = (sy - py) / (MTN_FOOT - py);
+    const lx = sx - lw * k, rx = sx + rw * k;
+    cx.save();
+    peakPath(sx, py, lw, rw, MTN_FOOT);
+    cx.clip();
+    cx.fillStyle = "#eaeff2";
     cx.beginPath();
-    cx.moveTo(lx, sy);
-    cx.lineTo(sx - 16, py + 12);
-    cx.quadraticCurveTo(sx, py - 6, sx + 16, py + 12);
-    cx.lineTo(rx, sy);
-    const lobes = 4, w = (rx - lx) / lobes;
+    cx.moveTo(lx - 4, sy);
+    cx.lineTo(sx, py - 10);
+    cx.lineTo(rx + 4, sy);
+    const lobes = Math.max(3, Math.round((rx - lx) / 45)), w = (rx - lx + 8) / lobes;
     for (let i = lobes - 1; i >= 0; i--){
-      const a = lx + w * (i + 1), b = lx + w * i;
-      cx.quadraticCurveTo((a + b) / 2, sy + w * 0.55, b, sy);
+      const a = lx - 4 + w * (i + 1), b = lx - 4 + w * i;
+      cx.quadraticCurveTo((a + b) / 2, sy + w * 0.6, b, sy);
     }
     cx.closePath(); cx.fill();
+    // cara en sombra
+    cx.fillStyle = "rgba(120,150,170,.12)";
+    cx.beginPath(); cx.moveTo(sx, py); cx.lineTo(rx + 4, sy + 30); cx.lineTo(sx + rw, MTN_FOOT);
+    cx.lineTo(sx + 6, MTN_FOOT); cx.closePath(); cx.fill();
+    cx.restore();
   }
 }
 
 function drawFarHills(off){
-  cx.fillStyle = "#4fb2de";                       // lago lejano
-  cx.fillRect(0, 322, viewW(), 30);
-  cx.fillStyle = "#a6d3e7";
-  for (const [hx, py, hw] of FAR_HILLS){
+  cx.fillStyle = "#acd8eb";
+  for (const [px, py, lw, rw] of PALE_PEAKS){
+    const sx = px - off;
+    if (sx + rw < 0 || sx - lw > viewW()) continue;
+    peakPath(sx, py, lw, rw, LAKE_Y + 20);
+    cx.fill();
+  }
+  for (const [hx, py, hw] of PALE_DOMES){
     const sx = hx - off;
     if (sx + hw < 0 || sx - hw > viewW()) continue;
     cx.beginPath();
-    cx.moveTo(sx - hw, 340);
-    cx.quadraticCurveTo(sx, py - (340 - py), sx + hw, 340);
+    cx.moveTo(sx - hw, LAKE_Y + 20);
+    cx.bezierCurveTo(sx - hw * 0.45, py, sx + hw * 0.45, py, sx + hw, LAKE_Y + 20);
     cx.closePath(); cx.fill();
   }
+  // lago: corre de punta a punta, tapado abajo por las colinas
+  const g = cx.createLinearGradient(0, LAKE_Y, 0, LAKE_Y + 40);
+  g.addColorStop(0, "#70c5e3"); g.addColorStop(1, "#89cae3");
+  cx.fillStyle = g;
+  cx.fillRect(0, LAKE_Y, viewW(), MTN_FOOT - LAKE_Y + 40);
+  cx.fillStyle = "rgba(255,255,255,.35)";
+  cx.fillRect(0, LAKE_Y, viewW(), 2);
 }
 
 function drawGreenHills(off){
@@ -592,10 +627,10 @@ function drawGreenHills(off){
   cx.closePath(); cx.fill();
 
   // arbolitos sobre la cresta
-  for (let k = Math.floor(off / 64) - 1; k < (off + viewW()) / 64 + 1; k++){
-    if (hash(k + 7) < 0.45) continue;
-    const lx = k * 64 + hash(k) * 40;
-    canopy(lx - off, greenRidge(lx) + 4, 0.38 + hash(k + 3) * 0.25, k);
+  for (let k = Math.floor(off / 44) - 1; k < (off + viewW()) / 44 + 1; k++){
+    if (hash(k + 7) < 0.3) continue;
+    const lx = k * 44 + hash(k) * 30;
+    canopy(lx - off, greenRidge(lx) + 6, 0.4 + hash(k + 3) * 0.3, k);
   }
 }
 

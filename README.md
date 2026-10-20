@@ -47,8 +47,9 @@ derecha:
 6. Llano, y el bastión enemigo.
 
 El agua frena a las unidades a la mitad. Las cuestas arriba frenan menos, hasta un 30 % en
-la subida más empinada. El fondo repite el parallax medido: sol fijo, montañas a 0.2 y
-colinas verdes a 0.52. Los puntos están en `TERRAIN` y se interpolan con una cúbica monótona
+la subida más empinada. El fondo repite el parallax medido: sol fijo; cerros celestes, lago y
+montañas a 0.24; colinas verdes a 0.52. Cada capa se reconstruyó alineando las seis capturas
+sobre esa misma capa, así las siluetas siguen sin cortes de una pantalla a la otra. Los puntos están en `TERRAIN` y se interpolan con una cúbica monótona
 (`heightAt(x)`). El dibujo es propio; del original solo se tomaron las medidas.
 
 ## Afuera por ahora
