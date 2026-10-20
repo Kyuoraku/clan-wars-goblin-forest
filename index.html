@@ -1,6 +1,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Bosque Ciénaga — v1</title>
+<title>Bosque Ciénaga</title>
 <style>
   :root{
     --bark:#1a1710;
@@ -104,14 +104,35 @@
 "use strict";
 
 // ---------------------------------------------------------------- constantes
-const MAP_W      = 2400;      // ancho del campo en unidades de mundo
-const GROUND_Y   = 430;       // línea de piso (terreno plano en v1)
-const WORLD_H    = 520;
+// El mapa está medido sobre capturas del original: vista de 844x600 y seis
+// pantallas solapadas con la cámara en 0, 690, 1350, 1950, 2610 y 3210.
+const MAP_W      = 4054;      // 3210 de recorrido de cámara + 844 de vista
+const WORLD_H    = 600;
 const DT         = 1/60;      // paso fijo de simulación
+
+// Perfil del piso [x, y], y medida desde arriba de la vista. De izquierda a
+// derecha: llano, loma grande, hoya con agua, meseta, loma chica, llano.
+const TERRAIN = [
+  [0,433],[280,432],[400,429],[600,434],[760,437],[840,435],[1000,431],
+  [1080,429],[1280,434],[1360,436],[1540,434],[1568,431],[1580,416],
+  [1590,402],[1600,387],[1640,335],[1680,296],[1720,278],[1760,282],
+  [1800,308],[1840,352],[1880,408],[1900,438],[1920,467],[1940,495],
+  [1960,521],[1985,541],[2000,559],[2022,578],[2046,589],[2065,592],
+  [2094,582],[2106,575],[2130,560],[2150,541],[2170,513],[2190,487],
+  [2210,458],[2230,433],[2240,432],[2400,429],[2600,434],[2720,437],
+  [2870,434],[2890,424],[2920,397],[2930,388],[2960,362],[3000,337],
+  [3040,326],[3080,330],[3120,349],[3160,381],[3180,399],[3200,421],
+  [3220,436],[3480,436],[3600,433],[3720,430],[3800,432],[4054,434],
+];
+const WATER = { x0:1985, x1:2152, y:541 };
+
+// El agua frena bastante; subir una cuesta frena menos.
+const WATER_SLOW = 0.5;       // multiplicador de velocidad dentro del agua
+const SLOPE_SLOW = 0.3;       // freno máximo en la subida más empinada
 
 const BASE = {
   hp: 2000,
-  w: 78, h: 150,
+  half: 88,                   // media anchura del cuerpo de la torre
   cannonRange: 320,
   cannonDmg: 26,
   cannonCd: 2.4,
@@ -133,6 +154,55 @@ const SPACING    = 20;        // separación mínima en la línea de frente
 const BOUNTY_MIN = 0.5;
 const BOUNTY_MAX = 3.0;
 
+// ---------------------------------------------------------------- terreno
+// Cúbica monótona (Fritsch–Carlson) entre los puntos medidos: suave y sin
+// sobrepasar los picos. Se tabula una vez por píxel de mundo.
+function monotone(pts){
+  const n = pts.length, m = new Array(n), d = [];
+  for (let i = 0; i < n - 1; i++)
+    d.push((pts[i+1][1] - pts[i][1]) / (pts[i+1][0] - pts[i][0]));
+  m[0] = d[0]; m[n-1] = d[n-2];
+  for (let i = 1; i < n - 1; i++)
+    m[i] = d[i-1] * d[i] <= 0 ? 0 : (d[i-1] + d[i]) / 2;
+  for (let i = 0; i < n - 1; i++){
+    if (d[i] === 0){ m[i] = m[i+1] = 0; continue; }
+    const a = m[i] / d[i], b = m[i+1] / d[i], s = a*a + b*b;
+    if (s > 9){ const t = 3 / Math.sqrt(s); m[i] = t*a*d[i]; m[i+1] = t*b*d[i]; }
+  }
+  return x => {
+    let i = 0;
+    while (i < n - 2 && x > pts[i+1][0]) i++;
+    const [x0, y0] = pts[i], [x1, y1] = pts[i+1], h = x1 - x0;
+    const t = Math.min(1, Math.max(0, (x - x0) / h)), t2 = t*t, t3 = t2*t;
+    return (2*t3 - 3*t2 + 1)*y0 + (t3 - 2*t2 + t)*h*m[i]
+         + (-2*t3 + 3*t2)*y1 + (t3 - t2)*h*m[i+1];
+  };
+}
+
+const GROUND = new Float32Array(MAP_W + 1);
+{
+  const f = monotone(TERRAIN);
+  for (let x = 0; x <= MAP_W; x++) GROUND[x] = f(x);
+}
+
+function heightAt(x){
+  const i = Math.max(0, Math.min(MAP_W - 1, Math.floor(x)));
+  const t = Math.max(0, Math.min(1, x - i));
+  return GROUND[i] + (GROUND[i+1] - GROUND[i]) * t;
+}
+const inWater = x => x > WATER.x0 && x < WATER.x1;
+
+// Altura a la que se paran las unidades: en el agua vadean con el agua a media pierna.
+function standY(x){
+  return inWater(x) ? Math.min(heightAt(x), WATER.y + 9) : heightAt(x);
+}
+
+function speedMult(x, dir){
+  if (inWater(x)) return WATER_SLOW;
+  const rise = heightAt(x) - heightAt(x + dir * 6);   // > 0 = cuesta arriba
+  return 1 - Math.min(SLOPE_SLOW, Math.max(0, rise / 6) * 0.3);
+}
+
 // ---------------------------------------------------------------- estado
 let G;
 
@@ -148,8 +218,9 @@ function reset(){
     fx: [],
     queue: { player: null, enemy: null },
     bases: {
-      player: { x: 130,         hp: BASE.hp, cd: 1.5, team:"player" },
-      enemy:  { x: MAP_W - 130, hp: BASE.hp, cd: 1.5, team:"enemy"  },
+      // posiciones medidas: las dos torres quedan cortadas por el borde
+      player: { x: 80,   hp: BASE.hp, cd: 1.5, team:"player" },
+      enemy:  { x: 4035, hp: BASE.hp, cd: 1.5, team:"enemy"  },
     },
     aiCd: 4,
     aiGold: 60,
@@ -173,7 +244,7 @@ function spawn(team, type){
   const s = UNITS[type];
   G.units.push({
     team, type, s,
-    x: G.bases[team].x + dirOf(team) * 46,
+    x: G.bases[team].x + dirOf(team) * 100,       // sale por la rampa
     hp: s.hp, maxHp: s.hp,
     cd: 0, state: "walk",
     bob: Math.random() * 6.28,
@@ -202,7 +273,7 @@ function findTarget(u){
     if (d < bestD){ bestD = d; best = o; }
   }
   const b = G.bases[foe];
-  const bd = Math.abs(b.x - u.x) - BASE.w / 2;
+  const bd = Math.abs(b.x - u.x) - BASE.half;
   if (bd < bestD){ bestD = bd; best = b; }
   return { target: best, dist: bestD };
 }
@@ -226,7 +297,7 @@ function damage(ent, dmg, killerTeam){
     else                     G.aiGold += solace;
 
     if (killerTeam === "player") popup(ent.x, "+" + reward, "#e0c96a");
-    burst(ent.x, GROUND_Y - 8, ent.team);
+    burst(ent.x, standY(ent.x) - 8, ent.team);
   } else {                                      // cayó una base
     G.over = ent.team === "player" ? "derrota" : "victoria";
   }
@@ -283,7 +354,7 @@ function step(){
         }
       } else {
         u.state = "walk";
-        const next = u.x + dir * u.s.speed * DT;
+        const next = u.x + dir * u.s.speed * speedMult(u.x, dir) * DT;
         const blocked = wallX !== null && (next - wallX) * dir > -SPACING;
         if (!blocked) u.x = next;
       }
@@ -310,14 +381,14 @@ function step(){
     }
     if (best){
       b.cd = BASE.cannonCd;
-      G.shots.push({ x:b.x, y:GROUND_Y - 118, tx:best, team, dmg:BASE.cannonDmg, sp:520, heavy:true });
+      G.shots.push({ x:b.x + dirOf(team) * 33, y:heightAt(b.x) - 315, tx:best, team, dmg:BASE.cannonDmg, sp:520, heavy:true });
     }
   }
 
   // ---- proyectiles
   for (const p of G.shots){
     if (!p.tx || p.tx.hp <= 0){ p.dead = true; continue; }
-    const ty = p.tx.s ? GROUND_Y - 16 : GROUND_Y - 70;
+    const ty = p.tx.s ? standY(p.tx.x) - 16 : heightAt(p.tx.x) - 150;
     const dx = p.tx.x - p.x, dy = ty - p.y;
     const d = Math.hypot(dx, dy);
     if (d < 10){ damage(p.tx, p.dmg, p.team); p.dead = true; continue; }
@@ -336,13 +407,13 @@ function step(){
 
 function shoot(u, target){
   G.shots.push({
-    x: u.x, y: GROUND_Y - 20, tx: target, team: u.team,
+    x: u.x, y: standY(u.x) - 20, tx: target, team: u.team,
     dmg: u.s.dmg, sp: 340, heavy: false,
   });
 }
 
 function popup(x, text, color){
-  G.fx.push({ kind:"text", x, y:GROUND_Y - 40, text, color, life:1.1, vy:26 });
+  G.fx.push({ kind:"text", x, y:standY(x) - 40, text, color, life:1.1, vy:26 });
 }
 function burst(x, y, team){
   for (let i = 0; i < 7; i++){
@@ -374,34 +445,68 @@ function clampCam(){
   G.cam = Math.max(0, Math.min(MAP_W - viewW(), G.cam));
 }
 
+// Capas de fondo con el parallax medido en las capturas: el sol queda fijo,
+// las montañas corren a 0.2 y las colinas verdes a 0.52 de la cámara.
+const MOUNTAINS = [            // [x en la capa, y del pico, media base]
+  [255,145,150],[734,178,140],[925,55,260],[1290,95,220],
+];
+const FAR_HILLS = [[120,330,260],[520,300,200],[860,320,240],[1180,290,220],[1450,325,200]];
+const GREEN_HILLS = [          // cresta de la capa 0.52
+  [0,150],[160,160],[240,164],[300,173],[350,184],[384,195],[430,210],
+  [470,228],[500,243],[550,270],[600,294],[640,311],[700,335],[760,353],
+  [820,369],[900,385],[1000,392],[1150,390],[1230,380],[1270,369],
+  [1310,359],[1340,350],[1390,329],[1430,314],[1490,292],[1540,272],
+  [1590,255],[1640,238],[1690,222],[1740,208],[1800,200],[1960,200],
+  [2010,209],[2080,225],[2140,244],[2190,264],[2250,295],[2300,317],
+  [2350,337],[2400,356],[2514,395],
+];
+const greenRidge = monotone(GREEN_HILLS);
+
+// Decorado del primer plano, en coordenadas de mundo.
+const TREES  = [[300,1],[455,1.15],[650,.9],[960,1.1],[1250,1],[1470,.95],
+                [1700,.8],[1820,.85],[2300,1.1],[2500,.95],[2700,1.05],
+                [3060,.8],[3330,1.1],[3560,1],[3700,1.15],[3900,.9]];
+const BUSHES = [[520,1],[1120,1.2],[2420,1],[3420,1.3],[3820,1]];
+const ROCKS  = [[110,1.2],[830,.8],[1150,1],[1660,1.3],[2185,.9],[2640,.8],
+                [3010,1],[3290,.7],[3600,.9]];
+const STUMPS = [[700],[1390],[2560],[3480]];
+
+function hash(n){ const s = Math.sin(n * 127.1) * 43758.5453; return s - Math.floor(s); }
+
 function draw(){
   cx.clearRect(0, 0, VW, VH);
 
-  // cielo bajo dosel
-  const sky = cx.createLinearGradient(0, 0, 0, VH);
-  sky.addColorStop(0, "#141a10");
-  sky.addColorStop(.55, "#1e2716");
-  sky.addColorStop(1, "#0e1109");
-  cx.fillStyle = sky;
-  cx.fillRect(0, 0, VW, VH);
-
   cx.save();
   cx.scale(scale, scale);
-  cx.translate(-G.cam, (VH / scale - WORLD_H) / 2);
+  const top = (VH / scale - WORLD_H) / 2;
+  cx.translate(0, top);
 
-  drawTrees(0.35, "#101508", 210);
-  drawTrees(0.62, "#18200e", 150);
+  // cielo
+  const sky = cx.createLinearGradient(0, 0, 0, 360);
+  sky.addColorStop(0, "#5197fe");
+  sky.addColorStop(1, "#c4e4f3");
+  cx.fillStyle = sky;
+  cx.fillRect(0, -top, viewW(), VH / scale);
 
-  // suelo
-  cx.fillStyle = "#232a14";
-  cx.fillRect(G.cam - 40, GROUND_Y, viewW() + 80, WORLD_H - GROUND_Y);
-  cx.fillStyle = "#2e3a1a";
-  cx.fillRect(G.cam - 40, GROUND_Y, viewW() + 80, 4);
+  // sol, fijo en pantalla
+  cx.fillStyle = "rgba(255,255,120,.35)";
+  cx.beginPath(); cx.arc(585, 122, 68, 0, 6.284); cx.fill();
+  cx.fillStyle = "#ffff33";
+  cx.beginPath(); cx.arc(585, 122, 60, 0, 6.284); cx.fill();
 
-  drawBase(G.bases.player, "#4e6b32");
-  drawBase(G.bases.enemy,  "#8c3b2a");
+  drawMountains(G.cam * 0.2);
+  drawFarHills(G.cam * 0.2);
+  drawGreenHills(G.cam * 0.52);
+
+  cx.translate(-G.cam, 0);
+  drawGround();
+  drawDecor();
+
+  drawBase(G.bases.player, 1);
+  drawBase(G.bases.enemy, -1);
 
   for (const u of G.units) drawUnit(u);
+  drawWater();
 
   for (const p of G.shots){
     cx.fillStyle = p.heavy ? "#d8a13c" : "#cfc39a";
@@ -427,56 +532,223 @@ function draw(){
   drawMinimap();
 }
 
-function drawTrees(par, color, h){
-  const off = G.cam * par;
-  cx.fillStyle = color;
-  const step = 96;
-  const from = Math.floor((G.cam - off) / step) * step;
-  for (let i = -2; i < viewW() / step + 3; i++){
-    const x = from + i * step + off;
-    const sway = Math.sin(x * 0.37) * 18;
-    cx.fillRect(x + sway, GROUND_Y - h, 15, h);
+// ---- capas de fondo (x en coordenadas de pantalla, off = corrimiento de la capa)
+function drawMountains(off){
+  for (const [mx, py, hw] of MOUNTAINS){
+    const sx = mx - off;
+    if (sx + hw < 0 || sx - hw > viewW()) continue;
+    const foot = 390;
+    const g = cx.createLinearGradient(0, py, 0, foot);
+    g.addColorStop(0, "#5f8fb8"); g.addColorStop(1, "#9dc3dc");
+    cx.fillStyle = g;
     cx.beginPath();
-    cx.moveTo(x + sway - 34, GROUND_Y - h + 22);
-    cx.lineTo(x + sway + 7,  GROUND_Y - h - 46);
-    cx.lineTo(x + sway + 48, GROUND_Y - h + 22);
+    cx.moveTo(sx - hw, foot);
+    cx.lineTo(sx - 16, py + 12);
+    cx.quadraticCurveTo(sx, py - 6, sx + 16, py + 12);
+    cx.lineTo(sx + hw, foot);
+    cx.closePath(); cx.fill();
+
+    // nieve con borde festoneado
+    const sy = py + (foot - py) * 0.36;
+    const k = (sy - py - 12) / (foot - py - 12);
+    const lx = sx - 16 - (hw - 16) * k, rx = sx + 16 + (hw - 16) * k;
+    cx.fillStyle = "#f3f6f8";
+    cx.beginPath();
+    cx.moveTo(lx, sy);
+    cx.lineTo(sx - 16, py + 12);
+    cx.quadraticCurveTo(sx, py - 6, sx + 16, py + 12);
+    cx.lineTo(rx, sy);
+    const lobes = 4, w = (rx - lx) / lobes;
+    for (let i = lobes - 1; i >= 0; i--){
+      const a = lx + w * (i + 1), b = lx + w * i;
+      cx.quadraticCurveTo((a + b) / 2, sy + w * 0.55, b, sy);
+    }
     cx.closePath(); cx.fill();
   }
 }
 
-function drawBase(b, color){
-  const x = b.x, top = GROUND_Y - BASE.h;
-  cx.fillStyle = "#191d10";
-  cx.fillRect(x - BASE.w/2 - 5, top + 12, BASE.w + 10, BASE.h - 12);
-  cx.fillStyle = "#2b3319";
-  cx.fillRect(x - BASE.w/2, top, BASE.w, BASE.h);
-  cx.fillStyle = color;
+function drawFarHills(off){
+  cx.fillStyle = "#4fb2de";                       // lago lejano
+  cx.fillRect(0, 322, viewW(), 30);
+  cx.fillStyle = "#a6d3e7";
+  for (const [hx, py, hw] of FAR_HILLS){
+    const sx = hx - off;
+    if (sx + hw < 0 || sx - hw > viewW()) continue;
+    cx.beginPath();
+    cx.moveTo(sx - hw, 340);
+    cx.quadraticCurveTo(sx, py - (340 - py), sx + hw, 340);
+    cx.closePath(); cx.fill();
+  }
+}
+
+function drawGreenHills(off){
+  const g = cx.createLinearGradient(0, 160, 0, 470);
+  g.addColorStop(0, "#1c4500"); g.addColorStop(1, "#8f8c00");
+  cx.fillStyle = g;
   cx.beginPath();
-  cx.moveTo(x - BASE.w/2 - 8, top);
-  cx.lineTo(x, top - 34);
-  cx.lineTo(x + BASE.w/2 + 8, top);
+  cx.moveTo(-8, WORLD_H + 200);
+  for (let sx = -8; sx <= viewW() + 8; sx += 8) cx.lineTo(sx, greenRidge(sx + off));
+  cx.lineTo(viewW() + 8, WORLD_H + 200);
   cx.closePath(); cx.fill();
 
-  // troneras
-  cx.fillStyle = "#0d1007";
-  for (let i = 0; i < 3; i++) cx.fillRect(x - 22, top + 34 + i * 32, 44, 13);
+  // arbolitos sobre la cresta
+  for (let k = Math.floor(off / 64) - 1; k < (off + viewW()) / 64 + 1; k++){
+    if (hash(k + 7) < 0.45) continue;
+    const lx = k * 64 + hash(k) * 40;
+    canopy(lx - off, greenRidge(lx) + 4, 0.38 + hash(k + 3) * 0.25, k);
+  }
+}
+
+// ---- primer plano (coordenadas de mundo)
+function drawGround(){
+  const x0 = Math.max(0, Math.floor(G.cam) - 10);
+  const x1 = Math.min(MAP_W, Math.ceil(G.cam + viewW()) + 10);
+  const path = new Path2D();
+  path.moveTo(x0, heightAt(x0));
+  for (let x = x0 + 4; x < x1; x += 4) path.lineTo(x, heightAt(x));
+  path.lineTo(x1, heightAt(x1));
+
+  const fill = new Path2D(path);
+  fill.lineTo(x1, WORLD_H + 200);
+  fill.lineTo(x0, WORLD_H + 200);
+  fill.closePath();
+  const g = cx.createLinearGradient(0, 270, 0, 440);
+  g.addColorStop(0, "#8b5d1d"); g.addColorStop(1, "#6d4d01");
+  cx.fillStyle = g;
+  cx.fill(fill);
+
+  cx.strokeStyle = "#1a1206"; cx.lineWidth = 1.3;
+  cx.stroke(path);
+}
+
+function drawWater(){
+  const { x0, x1, y } = WATER;
+  if (x1 < G.cam || x0 > G.cam + viewW()) return;
+  cx.fillStyle = "rgba(28,146,214,.88)";
+  cx.beginPath();
+  cx.moveTo(x0, y);
+  for (let x = x0; x <= x1; x += 6) cx.lineTo(x, y + Math.sin(x * 0.17 + G.t * 2.4) * 1.6);
+  for (let x = x1; x >= x0; x -= 4) cx.lineTo(x, heightAt(x));
+  cx.closePath(); cx.fill();
+}
+
+function canopy(x, y, s, seed){
+  const blobs = 6;
+  for (let pass = 0; pass < 2; pass++){
+    cx.fillStyle = pass ? "#39c414" : "#16760a";
+    for (let i = 0; i < blobs; i++){
+      const a = i / blobs * 6.284 + hash(seed + i);
+      const r = (22 + hash(seed * 3 + i) * 10) * s;
+      const bx = x + Math.cos(a) * 26 * s, by = y - 42 * s + Math.sin(a) * 16 * s;
+      cx.beginPath(); cx.arc(bx, by - pass * 3 * s, r - pass * 3 * s, 0, 6.284); cx.fill();
+    }
+  }
+  cx.fillStyle = "#7fe24a";
+  cx.beginPath(); cx.arc(x - 10 * s, y - 62 * s, 9 * s, 0, 6.284); cx.fill();
+}
+
+function drawTree(x, s){
+  const y = heightAt(x);
+  cx.fillStyle = "#d8c8a0"; cx.strokeStyle = "#3a2c14"; cx.lineWidth = 1.2;
+  cx.beginPath();
+  cx.moveTo(x - 7 * s, y);
+  cx.quadraticCurveTo(x - 2 * s, y - 40 * s, x - 10 * s, y - 80 * s);
+  cx.lineTo(x + 4 * s, y - 80 * s);
+  cx.quadraticCurveTo(x + 6 * s, y - 40 * s, x + 9 * s, y);
+  cx.closePath(); cx.fill(); cx.stroke();
+  canopy(x - 2 * s, y - 52 * s, s * 1.15, x);
+}
+
+function drawDecor(){
+  const lo = G.cam - 120, hi = G.cam + viewW() + 120;
+  for (const [x] of STUMPS){
+    if (x < lo || x > hi) continue;
+    const y = heightAt(x);
+    cx.fillStyle = "#5a3d14"; cx.fillRect(x - 7, y - 10, 14, 11);
+    cx.fillStyle = "#a07a3c"; cx.fillRect(x - 7, y - 12, 14, 3);
+  }
+  for (const [x, s] of ROCKS){
+    if (x < lo || x > hi) continue;
+    const y = heightAt(x);
+    cx.fillStyle = "#9b9d9e"; cx.strokeStyle = "#2b2b2b"; cx.lineWidth = 1;
+    cx.beginPath(); cx.ellipse(x, y - 9 * s, 17 * s, 11 * s, -0.15, 0, 6.284); cx.fill(); cx.stroke();
+  }
+  for (const [x, s] of BUSHES) if (x > lo && x < hi) canopy(x, heightAt(x) + 30 * s, s, x);
+  for (const [x, s] of TREES)  if (x > lo && x < hi) drawTree(x, s);
+}
+
+// Torre de piedra octogonal con techo rojo; dir = hacia dónde mira.
+function drawBase(b, dir){
+  const x = b.x, g = heightAt(x);
+  const X = d => x + dir * d;                     // d medido hacia el frente
+  cx.lineWidth = 1.2; cx.strokeStyle = "#2a2a2a";
+
+  // rampa de salida
+  cx.fillStyle = "#8a8a8a";
+  cx.beginPath();
+  cx.moveTo(X(40), g - 58); cx.lineTo(X(118), g - 58);
+  cx.lineTo(X(190), g + 10); cx.lineTo(X(40), g + 10);
+  cx.closePath(); cx.fill(); cx.stroke();
+  cx.fillStyle = "#b3b3b3";
+  cx.fillRect(Math.min(X(40), X(118)), g - 58, 78, 7);
+
+  // cuerpo: cara trasera, central y frontal
+  const top = g - 290, bot = g + 14;
+  const faces = [[-88,-30,"#626262"],[-30,32,"#7f7f7f"],[32,88,"#a3a3a3"]];
+  for (const [a, c, col] of faces){
+    cx.fillStyle = col;
+    cx.fillRect(Math.min(X(a), X(c)), top, Math.abs(X(c) - X(a)), bot - top);
+    cx.strokeRect(Math.min(X(a), X(c)), top, Math.abs(X(c) - X(a)), bot - top);
+  }
+  cx.fillStyle = "#222";
+  cx.fillRect(X(-88) < X(88) ? X(-88) : X(88), g - 160, 176, 14);
+  cx.fillStyle = "rgba(0,0,0,.25)";
+  for (const yy of [g - 252, g - 60]) cx.fillRect(Math.min(X(-88), X(88)), yy, 176, 6);
+
+  // puerta
+  cx.fillStyle = "#0e0e0e";
+  cx.fillRect(Math.min(X(45), X(67)), g - 140, 22, 72);
+
+  // techo
+  cx.fillStyle = "#9e1119";
+  cx.beginPath();
+  cx.moveTo(X(-104), top); cx.lineTo(X(135), top + 4);
+  cx.lineTo(X(20), g - 378);
+  cx.closePath(); cx.fill(); cx.stroke();
+  cx.fillStyle = "#6f0b11";
+  cx.beginPath();
+  cx.moveTo(X(-104), top); cx.lineTo(X(-30), top + 2); cx.lineTo(X(20), g - 378);
+  cx.closePath(); cx.fill();
+
+  // agujas
+  cx.fillStyle = "#9a9a9a";
+  for (const d of [-28, 4]){
+    cx.beginPath();
+    cx.moveTo(X(d - 5), g - 360); cx.lineTo(X(d), g - 440); cx.lineTo(X(d + 5), g - 360);
+    cx.closePath(); cx.fill(); cx.stroke();
+  }
+
+  // cañón
+  cx.fillStyle = "#c3121c";
+  cx.fillRect(Math.min(X(20), X(44)), g - 330, 24, 30);
+  cx.fillStyle = "#555";
+  cx.fillRect(Math.min(X(40), X(62)), g - 320, 22, 10);
 
   // vida
-  const w = BASE.w + 16, p = Math.max(0, b.hp / BASE.hp);
-  cx.fillStyle = "rgba(0,0,0,.6)";
-  cx.fillRect(x - w/2, top - 52, w, 7);
-  cx.fillStyle = p > .3 ? "#7ea34a" : "#b5432f";
-  cx.fillRect(x - w/2, top - 52, w * p, 7);
+  const w = 72, p = Math.max(0, b.hp / BASE.hp), hx = X(20) - w / 2;
+  cx.fillStyle = "rgba(0,0,0,.55)"; cx.fillRect(hx, g - 352, w, 5);
+  cx.fillStyle = p > .3 ? "#22dd22" : "#dd3322";
+  cx.fillRect(hx, g - 352, w * p, 5);
 }
 
 function drawUnit(u){
   const s = u.s;
   const lift = u.state === "walk" ? Math.abs(Math.sin(u.bob)) * 3 : 0;
-  const y = GROUND_Y - lift;
+  const y = standY(u.x) - lift;
   const face = dirOf(u.team);
 
   cx.fillStyle = "rgba(0,0,0,.35)";
-  cx.beginPath(); cx.ellipse(u.x, GROUND_Y + 2, s.r + 2, 3.5, 0, 0, 6.284); cx.fill();
+  cx.beginPath(); cx.ellipse(u.x, standY(u.x) + 2, s.r + 2, 3.5, 0, 0, 6.284); cx.fill();
 
   const body = u.flash > 0 ? "#f2e6c4"
              : u.team === "player" ? (s.ranged ? "#9ab861" : "#5e7f37")
